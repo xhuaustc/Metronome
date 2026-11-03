@@ -1,0 +1,7 @@
+AppIcon design
+
+Generated with the built-in image_gen tool. Resized to 1024x1024 with sips.
+Asset: Metronome/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon.png
+
+Final generation prompt:
+Use case: logo-brand. Asset type: final iOS app icon, single square 1024x1024 full bleed opaque image. Create a refined minimalist icon for a piano practice metronome. Background near-black graphite #0E0E10 with a very subtle soft tonal gradient. Center one unmistakable mechanical metronome: a clean tapered triangular body with rounded corners in satin ice-white, a dark inset, and one vivid blue #4DA3FF pendulum leaning right with a rounded rectangular sliding weight. Bold simple silhouette, precise balanced geometry, restrained shallow dimensional highlights, premium music instrument feel. Symbol occupies about 66 percent of canvas with generous safe margins, clear at small home-screen sizes. No text, letters, numbers, piano keys, extra symbols, frame, watermark, outer rounded-corner mask, or mockup. Square background extends fully to every edge; iOS supplies the corner mask.
