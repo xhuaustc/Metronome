@@ -6,10 +6,20 @@
 	<string>app-store-connect</string>
 	<key>destination</key>
 	<string>export</string>
+	<!-- 这个 Individual 团队没有 cloud-managed distribution certificate，
+	     自动签名在 exportArchive 阶段会直接报权限错误。改为手动签名，
+	     描述文件由 store/scripts/make-profile.sh 通过 API 生成后装机。 -->
 	<key>signingStyle</key>
-	<string>automatic</string>
+	<string>manual</string>
 	<key>teamID</key>
 	<string>3BVFM34328</string>
+	<key>signingCertificate</key>
+	<string>iPhone Distribution: Xiaohua Pan (3BVFM34328)</string>
+	<key>provisioningProfiles</key>
+	<dict>
+		<key>com.mpan.pianometronome</key>
+		<string>PianoMetronome AppStore</string>
+	</dict>
 	<key>uploadSymbols</key>
 	<true/>
 	<key>stripSwiftSymbols</key>

@@ -19,3 +19,13 @@ xcuserdata/
 
 # 本地工具数据
 .workbuddy/
+
+# 上架帮助页有独立仓库（xhuaustc/metronome-site），不并进主仓库
+site/
+
+# WorkBuddy 应用标记
+*.genie
+.wbapp_*/
+
+# Playwright 临时产物
+.playwright-mcp/
