@@ -37,6 +37,12 @@ struct MetronomeView: View {
             .frame(width: proxy.size.width, height: height, alignment: .top)
             .onAppear {
                 if canvasHeight == 0 { canvasHeight = proxy.size.height }
+                #if DEBUG
+                if ScreenshotMode.isActive {
+                    ScreenshotMode.apply(to: vm)
+                    showSettings = ScreenshotMode.showsSettings
+                }
+                #endif
             }
         }
         .ignoresSafeArea(.keyboard, edges: .bottom)
