@@ -49,7 +49,10 @@ struct SettingsView: View {
                         }
                         .foregroundStyle(Theme.textPrimary)
                         .padding(.horizontal, 14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .frame(height: 48)
+                        // 整行可点：没有这两行时，只有文字那一段能响应，右侧空白失效。
+                        .contentShape(Rectangle())
                         .background(
                             RoundedRectangle(cornerRadius: 11, style: .continuous)
                                 .fill(vm.timbre == timbre ? Theme.surface : Color.clear)
@@ -119,15 +122,24 @@ struct SettingsView: View {
     }
 
     private func toggleRow(_ title: String, isOn: Binding<Bool>) -> some View {
-        HStack {
-            Text(title)
-                .font(.system(size: 15))
-                .foregroundStyle(Theme.textPrimary)
-            Spacer()
-            Toggle("", isOn: isOn)
-                .labelsHidden()
-                .tint(Theme.accent)
+        // 整行可点：Toggle 自身只占右侧那一小块，点标题常常被当成失效。
+        // 这里让 Toggle 只作展示，点击交给整行的 Button 统一处理。
+        Button {
+            isOn.wrappedValue.toggle()
+        } label: {
+            HStack {
+                Text(title)
+                    .font(.system(size: 15))
+                    .foregroundStyle(Theme.textPrimary)
+                Spacer()
+                Toggle("", isOn: isOn)
+                    .labelsHidden()
+                    .tint(Theme.accent)
+                    .allowsHitTesting(false)
+            }
+            .frame(height: 54)
+            .contentShape(Rectangle())
         }
-        .frame(height: 54)
+        .buttonStyle(.plain)
     }
 }

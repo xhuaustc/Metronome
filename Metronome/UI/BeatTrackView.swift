@@ -121,6 +121,9 @@ struct SegmentedRow<Item: Hashable>: View {
                                 .stroke(selected ? Color.clear : Theme.stroke, lineWidth: 0.5)
                         )
                         .foregroundStyle(selected ? Theme.background : Theme.textSecondary)
+                        // 未选中时背景是 Color.clear，不显式声明热区的话
+                        // 圆角边缘那一点会点不动。这里统一按整块矩形响应。
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }

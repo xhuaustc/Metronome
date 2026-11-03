@@ -217,6 +217,7 @@ struct ToggleChip: View {
             .background(Capsule().fill(isOn ? Theme.accent.opacity(0.14) : Color.clear))
             .overlay(Capsule().stroke(isOn ? Theme.accent.opacity(0.45) : Theme.stroke, lineWidth: 0.5))
             .foregroundStyle(isOn ? Theme.accent : Theme.textSecondary)
+            .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(isOn ? [.isButton, .isSelected] : .isButton)

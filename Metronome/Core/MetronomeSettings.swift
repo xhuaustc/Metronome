@@ -14,7 +14,7 @@ struct MetronomeSettings: Codable, Equatable {
     static let `default` = MetronomeSettings(bpm: 96,
                                              timeSignature: .fourFour,
                                              subdivision: .none,
-                                             volume: 0.7,
+                                             volume: 0.85,
                                              timbre: .woodClick,
                                              accentEnabled: true,
                                              countInEnabled: true,

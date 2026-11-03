@@ -19,7 +19,7 @@ final class MetronomeEngine {
     private(set) var countInEnabled: Bool = true
     private(set) var timbre: Timbre = .woodClick
 
-    var volume: Float = 0.7 {
+    var volume: Float = 0.85 {
         didSet { player.volume = volume }
     }
 
