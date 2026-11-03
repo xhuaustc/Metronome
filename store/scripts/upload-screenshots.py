@@ -26,8 +26,10 @@ if not TOKEN:
 BASE = "https://api.appstoreconnect.apple.com/v1"
 VERSION_LOC_ID = "b6d9645b-f77c-43f1-b535-9dd35b626f38"
 # 注意：API 的枚举里还没有 APP_IPHONE_69，最新一档只在网页端提供。
-# 6.7 英寸这个槽位同时接受 1290×2796 和 1320×2868，我们的截图是后者。
-DISPLAY_TYPE = "APP_IPHONE_67"
+# 6.7 英寸这个槽位接受 1320×2868，正是 6.9 英寸的像素尺寸。
+# 可以同时传一套 6.5 英寸（1284×2778）作为兜底，老设备商品页也就能出图。
+DISPLAY_TYPE = os.environ.get("SCREENSHOT_DISPLAY_TYPE", "APP_IPHONE_67")
+SHOT_DIR = os.environ.get("SCREENSHOT_DIR", "")
 
 SHOTS = [
     ("01-idle.png", "打开即可开始：大号拍点与当前速度一目了然"),
@@ -65,7 +67,8 @@ def call(method, path, body=None, raw=None, url=None, headers=None):
 
 
 def main():
-    os.chdir(os.path.join(os.path.dirname(__file__), "..", "screenshots"))
+    base = os.path.join(os.path.dirname(__file__), "..", "screenshots")
+    os.chdir(os.path.join(base, SHOT_DIR) if SHOT_DIR else base)
 
     # 截图集可能已存在（重跑脚本），先查再建，避免重复。
     existing = call(
