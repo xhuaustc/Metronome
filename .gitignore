@@ -33,3 +33,6 @@ site/
 # Python 脚本缓存
 __pycache__/
 *.pyc
+
+# App Store Connect 令牌工具的编译产物（由 asc-token.swift 解释执行，无需入库）
+store/scripts/.asc-token
