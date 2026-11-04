@@ -34,8 +34,8 @@ final class SoundBank {
                       variant: variant % Self.variantsPerLevel)
         if let cached = cache[key] { return cached }
 
-        // 重音在高音上再抬一个八度的错觉，靠音高而非单纯加音量实现，避免削波。
-        var frequency = timbre.baseFrequency * pow(2.0, Double(accent.semitoneOffset) / 12.0)
+        // 重音主要靠撞击力度区分，共振频率只轻微抬高，保留同一机械装置的听感。
+        var frequency = timbre.baseFrequency * pow(2.0, Double(accent.semitoneOffset) / 48.0)
 
         // 电平按「峰值」定义，而不是乘在 tanh 输出上的系数——
         // tanh 会把原始波形压到 0.6 左右，用系数控制响度会让实际电平低到 -11dB。
@@ -47,8 +47,8 @@ final class SoundBank {
         }
 
         if countIn {
-            // 预备拍：低一个八度、略轻，明确传达「这是准备，不是开始」。
-            frequency *= 0.5
+            // 预备拍：略低、略轻，与正式拍点区分。
+            frequency *= 0.86
             peak *= 0.62
         }
 
@@ -62,67 +62,16 @@ final class SoundBank {
         let gainJitter: Float = [1.0, 0.97, 1.03][key.variant]
         let duration = isSubdivision ? timbre.duration * 0.72 : timbre.duration
 
-        let buffer = synthesize(frequency: frequency * jitter,
-                                duration: duration,
-                                decay: timbre.decay,
-                                noiseMix: timbre.noiseMix,
-                                // 变体增益最高到 ×1.03，钳一下避免归一化后越过满刻度。
-                                peak: min(peak * gainJitter, 0.99))
-        cache[key] = buffer
-        return buffer
-    }
-
-    private func synthesize(frequency: Double,
-                            duration: Double,
-                            decay: Double,
-                            noiseMix: Double,
-                            peak: Float) -> AVAudioPCMBuffer {
-        let frameCount = AVAudioFrameCount(duration * sampleRate)
+        let samples = ClickSynthesizer.render(timbre: timbre, frequency: frequency * jitter,
+                                              duration: duration, peak: min(peak * gainJitter, 0.99),
+                                              sampleRate: sampleRate)
+        let frameCount = AVAudioFrameCount(samples.count)
         let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount)!
         buffer.frameLength = frameCount
-
-        guard let channel = buffer.floatChannelData?[0] else { return buffer }
-
-        let total = Int(frameCount)
-        let fadeOutFrames = max(1, Int(0.004 * sampleRate))
-        var seed: UInt64 = 0x9E37_79B9_7F4A_7C15
-        var maxValue: Float = 0
-
-        for i in 0..<total {
-            let t = Double(i) / sampleRate
-
-            // 2ms 起振，避免咔嗒声；之后指数衰减。
-            let attack = min(t / 0.002, 1.0)
-            var envelope = attack * exp(-t * decay)
-
-            let tail = total - i
-            if tail < fadeOutFrames {
-                envelope *= Double(tail) / Double(fadeOutFrames)
-            }
-
-            // 基频 + 少量二次谐波，给「木质」一点厚度。
-            let tone = sin(2 * .pi * frequency * t) * 0.62
-                     + sin(2 * .pi * frequency * 2 * t) * 0.14
-
-            seed = seed &* 6364136223846793005 &+ 1442695040888963407
-            let unit = Double(seed >> 11) / Double(UInt64(1) << 53)
-            let noise = (unit * 2 - 1) * noiseMix * exp(-t * decay * 2.4)
-
-            // tanh 软限幅：任何组合下都不会削波。
-            let value = Float(tanh((tone + noise) * envelope))
-            channel[i] = value
-            if abs(value) > maxValue { maxValue = abs(value) }
+        if let channel = buffer.floatChannelData?[0] {
+            for i in samples.indices { channel[i] = samples[i] }
         }
-
-        // 峰值归一化：把实际波形缩放到设计电平。
-        // 这样三种音色、四个重音层级的响度关系由表格决定，而不是由衰减曲线的偶然峰值决定。
-        if maxValue > 0.0001 {
-            let scale = peak / maxValue
-            for i in 0..<total {
-                channel[i] *= scale
-            }
-        }
-
+        cache[key] = buffer
         return buffer
     }
 }

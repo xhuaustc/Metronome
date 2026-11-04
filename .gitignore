@@ -29,3 +29,7 @@ site/
 
 # Playwright 临时产物
 .playwright-mcp/
+
+# Python 脚本缓存
+__pycache__/
+*.pyc

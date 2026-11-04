@@ -10,17 +10,50 @@ import Foundation
 /// - 停止时 `player.stop()` 清空排队 buffer，立即静音且不残留。
 final class MetronomeEngine {
 
-    // MARK: - 状态（由 UI 写入，调度队列读取）
+    // MARK: - 状态（共享状态与 planner 由 lock 保护）
 
-    private(set) var bpm: Int = 96
-    private(set) var timeSignature: TimeSignature = .fourFour
-    private(set) var subdivision: Subdivision = .none
-    private(set) var accentEnabled: Bool = true
-    private(set) var countInEnabled: Bool = true
-    private(set) var timbre: Timbre = .woodClick
+    private var storedBPM: Int = 96
+    private var storedTimeSignature: TimeSignature = .fourFour
+    private var storedSubdivision: Subdivision = .none
+    private var storedAccentEnabled = true
+    private var storedCountInEnabled = true
+    private var storedTimbre: Timbre = .crystalTick
+    private var storedVolume: Float = 0.85
 
-    var volume: Float = 0.85 {
-        didSet { player.volume = volume }
+    private(set) var bpm: Int {
+        get { withStateLock { storedBPM } }
+        set { withStateLock { storedBPM = newValue } }
+    }
+    private(set) var timeSignature: TimeSignature {
+        get { withStateLock { storedTimeSignature } }
+        set { withStateLock { storedTimeSignature = newValue } }
+    }
+    private(set) var subdivision: Subdivision {
+        get { withStateLock { storedSubdivision } }
+        set { withStateLock { storedSubdivision = newValue } }
+    }
+    private(set) var accentEnabled: Bool {
+        get { withStateLock { storedAccentEnabled } }
+        set { withStateLock { storedAccentEnabled = newValue } }
+    }
+    private(set) var countInEnabled: Bool {
+        get { withStateLock { storedCountInEnabled } }
+        set { withStateLock { storedCountInEnabled = newValue } }
+    }
+    private(set) var timbre: Timbre {
+        get { withStateLock { storedTimbre } }
+        set { withStateLock { storedTimbre = newValue } }
+    }
+
+    var volume: Float {
+        get { withStateLock { storedVolume } }
+        set {
+            withStateLock { storedVolume = newValue }
+            schedulerQueue.async { [weak self] in
+                guard let self else { return }
+                self.player.volume = self.volume
+            }
+        }
     }
 
     var isRunning: Bool { isPlaying }
@@ -29,17 +62,34 @@ final class MetronomeEngine {
 
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
+    private let previewPlayer = AVAudioPlayerNode()
     private let sampleRate: Double
     private let format: AVAudioFormat
     private let bank: SoundBank
     private let planner: SchedulePlanner
     private let lock = NSLock()
 
+    private func withStateLock<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+
     // MARK: - 调度
 
     private let schedulerQueue = DispatchQueue(label: "com.metronome.scheduler", qos: .userInteractive)
     private var timer: DispatchSourceTimer?
-    private var isPlaying = false
+    private var storedIsPlaying = false
+    private var playbackGeneration: UInt64 = 0
+    private var isPlaying: Bool {
+        get { withStateLock { storedIsPlaying } }
+        set {
+            withStateLock {
+                if storedIsPlaying != newValue { playbackGeneration &+= 1 }
+                storedIsPlaying = newValue
+            }
+        }
+    }
     private var didStartPlanner = false
     private var variantCursor = 0
 
@@ -54,9 +104,31 @@ final class MetronomeEngine {
     // MARK: - 回调
 
     /// 系统中断（来电等）。引擎已自行停止并复位，界面只需更新状态。
-    var onInterruptionBegan: (() -> Void)?
+    private var storedOnInterruptionBegan: (() -> Void)?
+    var onInterruptionBegan: (() -> Void)? {
+        get { withStateLock { storedOnInterruptionBegan } }
+        set {
+            let previous = withStateLock { () -> (() -> Void)? in
+                let previous = storedOnInterruptionBegan
+                storedOnInterruptionBegan = newValue
+                return previous
+            }
+            withExtendedLifetime(previous) {}
+        }
+    }
     /// 音频服务重启或引擎意外停止，界面应复位显示。
-    var onEngineFailed: (() -> Void)?
+    private var storedOnEngineFailed: (() -> Void)?
+    var onEngineFailed: (() -> Void)? {
+        get { withStateLock { storedOnEngineFailed } }
+        set {
+            let previous = withStateLock { () -> (() -> Void)? in
+                let previous = storedOnEngineFailed
+                storedOnEngineFailed = newValue
+                return previous
+            }
+            withExtendedLifetime(previous) {}
+        }
+    }
 
     // MARK: - 初始化
 
@@ -65,13 +137,16 @@ final class MetronomeEngine {
         self.format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
         self.bank = SoundBank(sampleRate: sampleRate)
         self.planner = SchedulePlanner(sampleRate: sampleRate, bpm: 96, timeSignature: .fourFour)
+        // reset 不会 detach 节点；只在初始化时 attach 一次。
+        engine.attach(player)
+        engine.attach(previewPlayer)
         buildGraph()
         observeAudioNotifications()
     }
 
     private func buildGraph() {
-        engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: format)
+        engine.connect(previewPlayer, to: engine.mainMixerNode, format: format)
         engine.prepare()
         player.volume = volume
     }
@@ -86,6 +161,7 @@ final class MetronomeEngine {
                 if !self.engine.isRunning {
                     try self.engine.start()
                 }
+                self.previewPlayer.stop()
                 self.player.volume = self.volume
                 self.player.play()
 
@@ -107,6 +183,7 @@ final class MetronomeEngine {
     }
 
     private func stopInternal() {
+        previewPlayer.stop()
         guard isPlaying || timer != nil else {
             lock.lock(); planner.stop(); lock.unlock()
             return
@@ -142,10 +219,10 @@ final class MetronomeEngine {
         guard let now = currentPlayerFrame() else { return }
 
         if !didStartPlanner {
-            lock.lock()
-            planner.start(atFrame: now + startLatencySeconds * sampleRate,
-                          countIn: countInEnabled)
-            lock.unlock()
+            withStateLock {
+                planner.start(atFrame: now + startLatencySeconds * sampleRate,
+                              countIn: storedCountInEnabled)
+            }
             didStartPlanner = true
         }
 
@@ -169,7 +246,7 @@ final class MetronomeEngine {
                                  countIn: point.isCountIn,
                                  isSubdivision: !point.isMainBeat,
                                  variant: variant)
-        // 输出延迟补偿：让「听到的时刻」而非「送入硬件的时刻」对齐节拍。
+        // 按播放器采样帧调度；实际输出路径的延迟需要另行测量。
         let time = AVAudioTime(sampleTime: AVAudioFramePosition(frame.rounded()), atRate: sampleRate)
         player.scheduleBuffer(buffer, at: time, options: [], completionHandler: nil)
     }
@@ -183,32 +260,82 @@ final class MetronomeEngine {
 
     /// 视觉层每帧调用。只读，不产生任何副作用。
     func position() -> PlaybackPosition? {
-        guard isPlaying, let frame = currentPlayerFrame() else { return nil }
-        lock.lock()
-        defer { lock.unlock() }
-        return planner.position(at: frame)
+        // 不持锁查询 AVFoundation，并丢弃跨越停止或重启的旧播放头。
+        guard let generation = withStateLock({ storedIsPlaying ? playbackGeneration : nil }),
+              let frame = currentPlayerFrame() else { return nil }
+        return withStateLock {
+            guard storedIsPlaying, playbackGeneration == generation else { return nil }
+            return planner.position(at: frame)
+        }
+    }
+
+    /// 与 start/stop 在同一队列串行执行，快速停止再开始也使用最新方案。
+    func configurePractice(_ configuration: TempoPracticeConfiguration?) {
+        schedulerQueue.async { [weak self] in
+            guard let self else { return }
+            self.withStateLock { self.planner.configurePractice(configuration) }
+        }
+    }
+
+    func requestPracticeAction(_ action: TempoPracticeAction) -> Int? {
+        let frame = currentPlayerFrame()
+        return withStateLock { planner.requestPracticeAction(action, atFrame: frame) }
+    }
+
+    /// 用户主动试听时才发声，独立节点不改变节拍播放头。
+    func previewSound(_ timbre: Timbre) {
+        schedulerQueue.async { [weak self] in
+            guard let self, !self.isPlaying else { return }
+            do {
+                try self.activateSession()
+                if !self.engine.isRunning { try self.engine.start() }
+                self.previewPlayer.stop()
+                self.previewPlayer.volume = self.volume
+                self.previewPlayer.scheduleBuffer(self.bank.buffer(timbre: timbre, accent: .normal,
+                                                                   countIn: false, isSubdivision: false, variant: 0))
+                self.previewPlayer.play()
+            } catch {
+                DispatchQueue.main.async { self.onEngineFailed?() }
+            }
+        }
     }
 
     // MARK: - 参数
 
     func setBPM(_ value: Int) {
-        bpm = value
-        lock.lock(); planner.setBPM(value); lock.unlock()
+        withStateLock {
+            storedBPM = value
+            planner.setBPM(value)
+        }
+    }
+
+    func setMeter(_ signature: TimeSignature, counting: BeatCounting, grouping: Int, bpm: Int) {
+        withStateLock {
+            storedTimeSignature = signature
+            storedBPM = bpm
+            planner.setMeter(signature, counting: counting, grouping: grouping, bpm: bpm)
+        }
     }
 
     func setTimeSignature(_ value: TimeSignature) {
-        timeSignature = value
-        lock.lock(); planner.setTimeSignature(value); lock.unlock()
+        withStateLock {
+            storedTimeSignature = value
+            planner.setTimeSignature(value)
+        }
     }
 
     func setSubdivision(_ value: Subdivision) {
-        subdivision = value
-        lock.lock(); planner.setSubdivision(value); lock.unlock()
+        withStateLock {
+            storedSubdivision = value
+            planner.setSubdivision(value)
+        }
     }
 
     func setAccentEnabled(_ value: Bool) {
-        accentEnabled = value
-        lock.lock(); planner.setAccentEnabled(value); lock.unlock()
+        withStateLock {
+            storedAccentEnabled = value
+            planner.setAccentEnabled(value)
+        }
     }
 
     func setTimbre(_ value: Timbre) {
@@ -258,11 +385,15 @@ final class MetronomeEngine {
             switch type {
             case .began:
                 // 来电或其它 App 抢占：立即停止并复位到第一拍，且不自动恢复。
-                self.stop()
-                DispatchQueue.main.async { self.onInterruptionBegan?() }
+                self.schedulerQueue.async {
+                    self.stopInternal()
+                    DispatchQueue.main.async { self.onInterruptionBegan?() }
+                }
             case .ended:
                 // 只还原会话，绝不自动出声——解锁瞬间突然响是明确禁止的。
-                try? AVAudioSession.sharedInstance().setActive(true)
+                self.schedulerQueue.async {
+                    try? AVAudioSession.sharedInstance().setActive(true)
+                }
             @unknown default:
                 break
             }
@@ -273,16 +404,10 @@ final class MetronomeEngine {
                            queue: nil) { [weak self] _ in
             guard let self else { return }
             self.schedulerQueue.async {
-                self.isPlaying = false
-                self.timer?.cancel()
-                self.timer = nil
-                self.player.stop()
+                self.stopInternal()
                 self.engine.stop()
                 self.engine.reset()
                 self.buildGraph()
-                self.lock.lock()
-                self.planner.stop()
-                self.lock.unlock()
                 DispatchQueue.main.async { self.onEngineFailed?() }
             }
         }

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-把 store/screenshots 下的 6.9 英寸截图上传到 App Store Connect。
+上传两套尺寸的 7 张截图；保留旧图直至所有新图处理完成并校验成功。
 
 App Store Connect 的截图上传是三步协议，不能一次 PUT 完事：
   1. 建截图集（按显示类型分，这里只用 6.9 英寸）
@@ -12,6 +12,9 @@ App Store Connect 的截图上传是三步协议，不能一次 PUT 完事：
     python3 store/scripts/upload-screenshots.py
 """
 
+import hashlib
+import time
+from pathlib import Path
 import json
 import mimetypes
 import os
@@ -31,11 +34,10 @@ VERSION_LOC_ID = "b6d9645b-f77c-43f1-b535-9dd35b626f38"
 DISPLAY_TYPE = os.environ.get("SCREENSHOT_DISPLAY_TYPE", "APP_IPHONE_67")
 SHOT_DIR = os.environ.get("SCREENSHOT_DIR", "")
 
-SHOTS = [
-    ("01-idle.png", "打开即可开始：大号拍点与当前速度一目了然"),
-    ("02-playing.png", "播放中：当前拍放大高亮，第一拍带圈标记"),
-    ("03-settings.png", "三种音色、细分与预备拍，都在一页里"),
-]
+SHOTS = [(name, "") for name in [
+    "01-home.png", "02-practice.png", "03-practice-settings.png",
+    "04-meters.png", "05-appearance.png", "06-sounds.png", "07-favorites.png",
+]]
 
 
 def call(method, path, body=None, raw=None, url=None, headers=None):
@@ -52,29 +54,36 @@ def call(method, path, body=None, raw=None, url=None, headers=None):
     for k, v in (headers or {}).items():
         req.add_header(k, v)
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             raw_out = resp.read()
             return json.loads(raw_out) if raw_out and not url else {}
     except urllib.error.HTTPError as e:
         detail = e.read().decode()
-        print(f"  ✗ {method} {path or url} -> HTTP {e.code}")
+        print(f"  ✗ {method} {path or '<upload>'} -> HTTP {e.code}")
         try:
             for err in json.loads(detail)["errors"]:
                 print(f"    {err.get('code')}: {err.get('detail')}")
         except Exception:
-            print("   ", detail[:400])
+            print("    上传服务返回非 JSON 错误，原截图保留")
         return None
 
 
 def main():
+    if os.environ.get("ASC_REPLACE_SCREENSHOTS") != "1":
+        sys.exit("请在版本可编辑且获得替换授权后设置 ASC_REPLACE_SCREENSHOTS=1")
     base = os.path.join(os.path.dirname(__file__), "..", "screenshots")
-    os.chdir(os.path.join(base, SHOT_DIR) if SHOT_DIR else base)
+    os.chdir(os.path.abspath(SHOT_DIR) if SHOT_DIR else base)
+    backup = Path(os.environ["SCREENSHOT_BACKUP_DIR"]).resolve()
+    if not backup.is_dir():
+        sys.exit("缺少旧截图备份目录")
 
     # 截图集可能已存在（重跑脚本），先查再建，避免重复。
     existing = call(
         "GET",
         f"/appStoreVersionLocalizations/{VERSION_LOC_ID}/appScreenshotSets",
     )
+    if existing is None or existing.get("links", {}).get("next"):
+        sys.exit("读取截图集失败或结果不完整，停止操作")
     set_id = None
     if existing:
         for s in existing["data"]:
@@ -106,12 +115,36 @@ def main():
         set_id = r["data"]["id"]
         print(f"新建截图集 {set_id}")
 
-    # 上一次失败会留下「已建占位但没传完」的截图，同一个位置塞两张会冲突。
+    # 在删除已有截图前验证所有新文件，确保失败时仍可用备份恢复。
+    for name, _ in SHOTS:
+        if not os.path.isfile(name) or os.path.getsize(name) == 0:
+            sys.exit(f"截图缺失或为空：{name}")
     leftovers = call("GET", f"/appScreenshotSets/{set_id}/appScreenshots")
-    if leftovers:
-        for s in leftovers["data"]:
-            call("DELETE", f"/appScreenshots/{s['id']}")
-            print(f"  清掉残留占位 {s['id']}")
+    if leftovers is None:
+        sys.exit("读取现有截图失败，未删除任何截图")
+    if leftovers.get("links", {}).get("next"):
+        sys.exit("截图列表未完整读取，停止操作")
+    old_shots = leftovers["data"]
+    if len(old_shots) + len(SHOTS) > 10:
+        sys.exit("空间不足以保留旧图并验证新图，请人工处理；未删除任何截图")
+    for shot in old_shots:
+        saved = backup / (shot['id'] + '.png')
+        checksum = shot['attributes'].get('sourceFileChecksum')
+        if not saved.is_file():
+            sys.exit("旧截图备份缺失，停止替换")
+        digest = hashlib.md5(saved.read_bytes()).hexdigest()
+        if digest != checksum:
+            # Apple CDN 会重新编码 PNG，原始上传 MD5 与下载文件可能不同。
+            # 仅接受已与当前原生尺寸 CDN 图逐字节复核过的备份清单。
+            manifest = backup / "verified-backups.json"
+            verified = json.loads(manifest.read_text()).get(shot['id'], {}) if manifest.is_file() else {}
+            asset = shot['attributes'].get('imageAsset', {})
+            if (verified.get('sourceFileChecksum') != checksum
+                    or verified.get('backupMD5') != digest
+                    or verified.get('width') != asset.get('width')
+                    or verified.get('height') != asset.get('height')):
+                sys.exit("旧截图备份校验不符，停止替换")
+    new_ids = []
 
     ok = 0
     for name, caption in SHOTS:
@@ -133,9 +166,13 @@ def main():
             },
         )
         if not r:
-            continue
+            sys.exit(f"创建截图失败：{name}")
         shot_id = r["data"]["id"]
+        new_ids.append(shot_id)
+        (backup / ("new-" + DISPLAY_TYPE + ".json")).write_text(json.dumps(new_ids))
         ops = r["data"]["attributes"].get("uploadOperations") or []
+        if not ops:
+            sys.exit(f"截图未返回上传指令：{name}")
 
         with open(name, "rb") as f:
             blob = f.read()
@@ -145,7 +182,7 @@ def main():
             hdrs = {h["name"]: h["value"] for h in op.get("requestHeaders", [])}
             res = call(op["method"], None, raw=chunk, url=op["url"], headers=hdrs)
             if res is None:
-                break
+                sys.exit(f"截图分片上传失败：{name}")
 
         r = call(
             "PATCH",
@@ -154,16 +191,43 @@ def main():
                 "data": {
                     "type": "appScreenshots",
                     "id": shot_id,
-                    "attributes": {"uploaded": True},
+                    "attributes": {"uploaded": True, "sourceFileChecksum": hashlib.md5(blob).hexdigest()},
                 }
             },
         )
-        if r:
-            state = r["data"]["attributes"].get("assetDeliveryState", {}).get("state")
-            print(f"  ✓ 已上传，状态 {state}")
-            ok += 1
+        if not r:
+            sys.exit(f"截图提交失败：{name}")
+        state = r["data"]["attributes"].get("assetDeliveryState", {}).get("state")
+        if state in ("FAILED", "REJECTED"):
+            sys.exit(f"截图处理失败：{name}，状态 {state}")
+        print(f"  ✓ 已上传，状态 {state}")
+        ok += 1
 
-    print(f"\n完成 {ok}/{len(SHOTS)} 张")
+    # 所有新截图完成服务端处理后，才调整顺序并移除有备份的旧图。
+    for shot_id in new_ids:
+        for attempt in range(180):
+            result = call("GET", f"/appScreenshots/{shot_id}")
+            if result is None:
+                sys.exit("新图校验请求失败，旧图保留")
+            state = result['data']['attributes'].get('assetDeliveryState', {}).get('state')
+            if state == "COMPLETE":
+                break
+            if state in ("FAILED", "REJECTED"):
+                sys.exit("新图处理失败，旧图保留")
+            time.sleep(2)
+        else:
+            sys.exit("新图处理尚未完成，旧图保留")
+    order = new_ids + [shot['id'] for shot in old_shots]
+    if call("PATCH", f"/appScreenshotSets/{set_id}/relationships/appScreenshots",
+            {"data": [{"type": "appScreenshots", "id": value} for value in order]}) is None:
+        sys.exit("排序失败，旧图保留")
+    for shot in old_shots:
+        if call("DELETE", f"/appScreenshots/{shot['id']}") is None:
+            sys.exit("清理旧截图失败，新旧图均已备份")
+    final = call("GET", f"/appScreenshotSets/{set_id}/appScreenshots")
+    if final is None or [shot['id'] for shot in final['data']] != new_ids:
+        sys.exit("最终截图顺序校验失败，请人工检查")
+    print(f"完成 {ok}/{len(SHOTS)} 张，服务端处理及顺序校验通过")
 
 
 if __name__ == "__main__":

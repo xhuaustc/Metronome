@@ -17,17 +17,47 @@ enum ScreenshotMode {
         ProcessInfo.processInfo.arguments.contains("-screenshotPlaying")
     }
 
+    static var showsFavorites: Bool {
+        ProcessInfo.processInfo.arguments.contains("-screenshotFavorites")
+    }
+
     static var showsSettings: Bool {
         ProcessInfo.processInfo.arguments.contains("-screenshotSettings")
     }
 
-    /// 在主界面出现时调用。只影响展示状态，不改任何持久化设置。
+    static var showsPracticeSettings: Bool { ProcessInfo.processInfo.arguments.contains("-screenshotPracticeSettings") }
+    static var showsMeter: Bool { ProcessInfo.processInfo.arguments.contains("-screenshotMeter") }
+    static var showsSounds: Bool { ProcessInfo.processInfo.arguments.contains("-screenshotSounds") }
+
+    /// 专用截图模拟器中调用；使用真实配置和播放流程准备展示状态。
     @MainActor
     static func apply(to vm: MetronomeViewModel) {
         guard isActive else { return }
 
-        // 预备拍会盖住拍号数字，截图里不想要它。
+        vm.setPractice(TempoPracticeConfiguration())
+        vm.setTheme(.icon)
+        vm.setSound(.crystalTick)
+        vm.setTimeSignature(.fourFour)
+        vm.setSubdivision(.none)
+        vm.setBPM(96)
         vm.setCountInEnabled(false)
+        if showsMeter {
+            vm.setTimeSignature(.twelveEight)
+            vm.setSubdivision(.three)
+        }
+        if showsFavorites, vm.favorites.items.isEmpty {
+            for bpm in [60, 96, 120] {
+                vm.setBPM(bpm)
+                vm.saveFavorite()
+            }
+            vm.setBPM(96)
+        }
+        if showsPracticeSettings || ProcessInfo.processInfo.arguments.contains("-screenshotPractice") {
+            var practice = TempoPracticeConfiguration()
+            practice.enabled = true
+            vm.setPractice(practice)
+            if !showsPracticeSettings { vm.start() }
+        }
 
         if isPlaying {
             vm.setSubdivision(.two)

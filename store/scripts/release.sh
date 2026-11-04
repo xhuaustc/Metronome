@@ -22,8 +22,9 @@ cd "$ROOT"
 PROJECT="PianoMetronome.xcodeproj"
 SCHEME="PianoMetronome"
 TEAM_ID="3BVFM34328"
-ARCHIVE="build/PianoMetronome.xcarchive"
-EXPORT_DIR="build/export"
+RELEASE_DIR="${RELEASE_DIR:-build/releases/$(date +%Y%m%d-%H%M%S)}"
+ARCHIVE="$RELEASE_DIR/PianoMetronome.xcarchive"
+EXPORT_DIR="$RELEASE_DIR/export"
 EXPORT_OPTIONS="Support/ExportOptions.plist"
 SIGN_IDENTITY="iPhone Distribution: Xiaohua Pan (3BVFM34328)"
 PROFILE_NAME="PianoMetronome AppStore"
@@ -41,6 +42,7 @@ if [ "$UPLOAD" = "1" ]; then
   : "${ASC_KEY_PATH:?未设置 ASC_KEY_PATH}"
   ASC_KEY_PATH="${ASC_KEY_PATH/#\~/$HOME}"
   [ -f "$ASC_KEY_PATH" ] || { echo "找不到密钥文件：$ASC_KEY_PATH"; exit 1; }
+  export API_PRIVATE_KEYS_DIR="$(dirname "$ASC_KEY_PATH")"
   AUTH_ARGS=(-authenticationKeyPath "$ASC_KEY_PATH"
              -authenticationKeyID "$ASC_KEY_ID"
              -authenticationKeyIssuerID "$ASC_ISSUER_ID")
@@ -52,9 +54,9 @@ SWIFT_FLAGS='$(inherited) -Xfrontend -disable-sandbox'
 # 手动签名不需要 -allowProvisioningUpdates；带上它反而会去碰云签名，
 # 在这个 Individual 团队上直接报权限错误。
 
-echo "==> 清理上次产物"
-rm -rf "$ARCHIVE" "$EXPORT_DIR"
-mkdir -p build
+# 每次发布写入独立目录，不覆盖或删除已有归档。
+[ ! -e "$ARCHIVE" ] && [ ! -e "$EXPORT_DIR" ] || { echo "产物目录已存在，请使用新的 RELEASE_DIR"; exit 1; }
+mkdir -p "$RELEASE_DIR"
 
 echo "==> 归档（Release）"
 # Individual 团队拿不到 cloud-managed distribution certificate，自动签名
@@ -72,7 +74,10 @@ ARCHIVE_CMD=(xcodebuild archive
   PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME"
   OTHER_SWIFT_FLAGS="$SWIFT_FLAGS")
 
-"${ARCHIVE_CMD[@]}" 2>&1 | grep -E "error:|ARCHIVE (SUCCEEDED|FAILED)" || true
+"${ARCHIVE_CMD[@]}" > "$RELEASE_DIR/archive.log" 2>&1 || {
+  tail -60 "$RELEASE_DIR/archive.log"
+  exit 1
+}
 
 [ -d "$ARCHIVE" ] || { echo "归档失败"; exit 1; }
 

@@ -2,11 +2,17 @@ import Foundation
 
 /// 拍单位：BPM 所指的音符时值，由拍号分母决定。
 public enum BeatUnit: String, Codable, Sendable {
+    case half
     case quarter
     case eighth
+    case dottedQuarter
+    case dottedHalf
 
     public var symbol: String {
         switch self {
+        case .half: return "𝅗𝅥"
+        case .dottedQuarter: return "♩."
+        case .dottedHalf: return "𝅗𝅥."
         case .quarter: return "♩"
         case .eighth: return "♪"
         }
@@ -33,79 +39,60 @@ public enum AccentLevel: Int, Codable, Sendable, Comparable {
     }
 }
 
-/// V1 支持的拍号。BPM 恒等于「拍单位」的每分钟个数：
-/// 分母为 4 时 BPM 指四分音符，分母为 8 时指八分音符。
+/// 计拍方式：旧数据默认按谱面分母计拍，复拍子可按附点音符大拍计拍。
+public enum BeatCounting: String, Codable, CaseIterable, Sendable {
+    case written, grouped
+    public var title: String { self == .grouped ? "按大拍" : "按小拍" }
+}
+
 public enum TimeSignature: String, CaseIterable, Codable, Sendable, Identifiable {
-    case twoFour = "2/4"
-    case threeFour = "3/4"
-    case fourFour = "4/4"
-    case threeEight = "3/8"
-    case sixEight = "6/8"
+    case twoFour = "2/4", threeFour = "3/4", fourFour = "4/4"
+    case threeEight = "3/8", sixEight = "6/8", nineEight = "9/8", twelveEight = "12/8"
+    case twoTwo = "2/2", threeTwo = "3/2", sixFour = "6/4"
+    case fiveFour = "5/4", sevenFour = "7/4", fiveEight = "5/8", sevenEight = "7/8"
 
     public var id: String { rawValue }
     public var display: String { rawValue }
-
-    public var numerator: Int {
-        switch self {
-        case .twoFour: return 2
-        case .threeFour, .threeEight: return 3
-        case .fourFour: return 4
-        case .sixEight: return 6
-        }
-    }
-
-    public var denominator: Int {
-        switch self {
-        case .twoFour, .threeFour, .fourFour: return 4
-        case .threeEight, .sixEight: return 8
-        }
-    }
-
-    public var beatUnit: BeatUnit {
-        denominator == 8 ? .eighth : .quarter
-    }
-
-    /// 每小节主拍数，等于分子。
+    public static let common: [Self] = [.twoFour, .threeFour, .fourFour, .sixEight]
+    public var numerator: Int { Int(rawValue.split(separator: "/")[0])! }
+    public var denominator: Int { Int(rawValue.split(separator: "/")[1])! }
+    public var beatUnit: BeatUnit { denominator == 2 ? .half : denominator == 8 ? .eighth : .quarter }
     public var beatsPerBar: Int { numerator }
+    public var isCompound: Bool { [.sixEight, .nineEight, .twelveEight, .sixFour].contains(self) }
+    public var isIrregular: Bool { numerator == 5 || numerator == 7 }
 
-    /// 主拍的分组结构，决定次级重音位置。6/8 为 3+3。
-    public var groups: [Int] {
-        switch self {
-        case .sixEight: return [3, 3]
-        default: return [numerator]
-        }
+    public var groupingOptions: [[Int]] {
+        if numerator == 5 { return [[2, 3], [3, 2]] }
+        if numerator == 7 { return [[2, 2, 3], [3, 2, 2], [2, 3, 2]] }
+        if isCompound { return [Array(repeating: 3, count: numerator / 3)] }
+        return [[numerator]]
     }
-
-    public var isCompound: Bool { groups.count > 1 }
-
-    /// 小节内第 index 个主拍（0-based）的重音层级。
-    public func accent(atBeat index: Int) -> AccentLevel {
+    public var groups: [Int] { groupingOptions[0] }
+    public func groups(grouping: Int) -> [Int] { groupingOptions[min(max(grouping, 0), groupingOptions.count - 1)] }
+    public func beatCount(_ counting: BeatCounting) -> Int { isCompound && counting == .grouped ? numerator / 3 : numerator }
+    public func unit(_ counting: BeatCounting) -> BeatUnit {
+        guard isCompound && counting == .grouped else { return beatUnit }
+        return denominator == 8 ? .dottedQuarter : .dottedHalf
+    }
+    public func unitsPerBeat(_ counting: BeatCounting) -> Int { isCompound && counting == .grouped ? 3 : 1 }
+    public func accent(atBeat index: Int, counting: BeatCounting = .written, grouping: Int = 0) -> AccentLevel {
         guard index > 0 else { return .strong }
-        guard isCompound else { return .normal }
+        if isCompound && counting == .grouped {
+            // 四大拍的复拍子在第三大拍保留次重音。
+            return numerator == 12 && index == 2 ? .group : .normal
+        }
+        guard isCompound || isIrregular else { return .normal }
         var cursor = 0
-        for size in groups {
+        for size in groups(grouping: grouping) {
             if cursor == index { return .group }
             cursor += size
         }
         return .normal
     }
-
-    /// 谱面上以附点四分音符记速时，等价值 = bpm / dotFactor。
-    /// 仅当一小节可被 3 个八分音符整除时有意义（3/8、6/8）。
-    public var dottedQuarterFactor: Double? {
-        guard denominator == 8, numerator % 3 == 0 else { return nil }
-        return 3.0
-    }
-
-    /// 用于界面标注：`♩ = 96` / `♪ = 96`
-    public func tempoLabel(bpm: Int) -> String {
-        "\(beatUnit.symbol) = \(bpm)"
-    }
-
-    /// 换算提示，如 6/8 下 `♩. = 32`；无意义时返回 nil。
+    public var dottedQuarterFactor: Double? { denominator == 8 && numerator % 3 == 0 ? 3 : nil }
+    public func tempoLabel(bpm: Int, counting: BeatCounting = .written) -> String { "\(unit(counting).symbol) = \(bpm)" }
     public func dottedEquivalentLabel(bpm: Int) -> String? {
         guard let factor = dottedQuarterFactor else { return nil }
-        let value = Double(bpm) / factor
-        return "♩. = \(Int(value.rounded()))"
+        return "♩. = \(Int((Double(bpm) / factor).rounded()))"
     }
 }

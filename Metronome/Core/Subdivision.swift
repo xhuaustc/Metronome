@@ -55,6 +55,11 @@ public struct SoundPoint: Equatable, Sendable {
 
 /// 视觉层读取的播放位置快照。
 public struct PlaybackPosition: Equatable, Sendable {
+    public let bpm: Int
+    public let practice: TempoPracticeProgress?
+    public let timeSignature: TimeSignature
+    public let beatsPerBar: Int
+    public let partsPerBeat: Int
     public let beat: Int
     public let part: Int
     public let barNumber: Int
@@ -64,4 +69,15 @@ public struct PlaybackPosition: Equatable, Sendable {
     public let progress: Double
     /// 距离下一次发声还有多少秒（视觉提前量可用），无下一声时为 nil。
     public let secondsToNext: Double?
+    /// 连续主拍进度，以两拍为一个摆动周期，不受小节、预备拍或细分切换重置。
+    public let pendulumPhase: Double
+}
+
+// 摆杆只消费音频采样时钟投影：每个主拍抵达交替端点，细分不增加摆动次数。
+extension PlaybackPosition {
+    public static let pendulumAmplitude: Double = 18
+
+    public func pendulumAngle(amplitude: Double = PlaybackPosition.pendulumAmplitude) -> Double {
+        -cos(pendulumPhase * .pi) * amplitude
+    }
 }

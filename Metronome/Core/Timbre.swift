@@ -1,54 +1,69 @@
 import Foundation
 
-/// V1 的三种音色。参数是合成用的声学描述，不含任何播放逻辑，因此可放在 Core 层。
-enum Timbre: String, CaseIterable, Identifiable, Codable {
-    case woodClick
-    case beep
-    case woodblock
-
-    var id: String { rawValue }
+/// 独立于外观的机械敲击音色。
+enum Timbre: String, CaseIterable, Codable {
+    case crystalTick, woodKnock, feltHammer, electroPulse
 
     var displayName: String {
         switch self {
-        case .woodClick: return "木质 click"
-        case .beep: return "电子 beep"
-        case .woodblock: return "低木鱼"
+        case .crystalTick: return "清脆机械敲击"
+        case .woodKnock: return "木壳机械敲击"
+        case .feltHammer: return "柔和机械敲击"
+        case .electroPulse: return "紧致机械敲击"
         }
     }
 
-    /// 基准音高（重音在其上叠加半音）。
     var baseFrequency: Double {
         switch self {
-        case .woodClick: return 1600
-        case .beep: return 1200
-        case .woodblock: return 800
+        case .crystalTick: return 1650
+        case .woodKnock: return 1250
+        case .feltHammer: return 950
+        case .electroPulse: return 1850
         }
     }
 
-    /// 噪声瞬态占比，决定「木头感」的强弱。
-    var noiseMix: Double {
-        switch self {
-        case .woodClick: return 0.55
-        case .beep: return 0.04
-        case .woodblock: return 0.72
-        }
-    }
-
-    /// 指数衰减系数，越大衰减越快。
     var decay: Double {
         switch self {
-        case .woodClick: return 95
-        case .beep: return 42
-        case .woodblock: return 68
+        case .crystalTick: return 230
+        case .woodKnock: return 260
+        case .feltHammer: return 210
+        case .electroPulse: return 310
         }
     }
 
-    /// 发声时长，必须短于最快速率下的拍间隔（240BPM = 250ms）。
+    var noiseMix: Double {
+        switch self {
+        case .crystalTick: return 0.50
+        case .woodKnock: return 0.65
+        case .feltHammer: return 0.25
+        case .electroPulse: return 0.55
+        }
+    }
+
+    /// 均短于 400 BPM 四等分的 37.5ms 间隔。
     var duration: Double {
         switch self {
-        case .woodClick: return 0.055
-        case .beep: return 0.075
-        case .woodblock: return 0.065
+        case .crystalTick: return 0.034
+        case .woodKnock: return 0.034
+        case .feltHammer: return 0.036
+        case .electroPulse: return 0.030
+        }
+    }
+
+    var attack: Double {
+        switch self {
+        case .crystalTick: return 0.00025
+        case .woodKnock, .electroPulse: return 0.0002
+        case .feltHammer: return 0.0005
+        }
+    }
+
+    /// 仅用于迁移旧收藏的三种独立音色。
+    static func legacy(_ raw: String) -> Self? {
+        switch raw {
+        case "woodClick", "woodblock": return .woodKnock
+        case "beep": return .crystalTick
+        default: return Self(rawValue: raw)
         }
     }
 }

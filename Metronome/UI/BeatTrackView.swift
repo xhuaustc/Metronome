@@ -6,24 +6,44 @@ struct BeatTrackView: View {
     let timeSignature: TimeSignature
     let partsPerBeat: Int
     let position: PlaybackPosition?
+    var compact = false
 
-    private var beatsPerBar: Int { timeSignature.beatsPerBar }
+    private let accent = Theme.accent
+    private var beatsPerBar: Int { position?.beatsPerBar ?? timeSignature.beatsPerBar }
     private var activeBeat: Int? { position?.beat }
     private var activePart: Int { position?.part ?? 0 }
 
     var body: some View {
         VStack(spacing: 6) {
-            HStack(spacing: 0) {
-                ForEach(0..<beatsPerBar, id: \.self) { index in
-                    column(index)
-                        .frame(maxWidth: .infinity)
+            GeometryReader { proxy in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 0) {
+                        ForEach(0..<beatsPerBar, id: \.self) { index in
+                            column(index)
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                    .frame(width: max(proxy.size.width, CGFloat(beatsPerBar) * 40))
                 }
             }
+            .frame(height: compact ? 58 : 70)
             numberBlock
         }
-        // 必须显式撑满宽度，否则 HStack 会收缩到内容宽度，拍点全部挤在左侧。
         .frame(maxWidth: .infinity)
         .animation(nil, value: activeBeat)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("拍点，\(timeSignature.display) 拍号，每小节 \(beatsPerBar) 拍")
+        .accessibilityValue(accessibilityPosition)
+    }
+
+    private var accessibilityPosition: String {
+        guard let position else { return "已停止" }
+        let beat = "第 \(position.beat + 1) 拍"
+        let part = partsPerBeat > 1 ? "，细分 \(position.part + 1)/\(partsPerBeat)" : ""
+        if position.isCountIn {
+            return "预备拍，\(beat)，共 \(beatsPerBar) 拍\(part)"
+        }
+        return "第 \(position.barNumber) 小节，\(beat)\(part)"
     }
 
     private func column(_ index: Int) -> some View {
@@ -31,33 +51,28 @@ struct BeatTrackView: View {
         let isFirst = index == 0
         let isGroupStart = timeSignature.isCompound && index == timeSignature.groups.first
 
-        var base: CGFloat = 17
-        if isFirst { base *= 1.18 }
-        if isGroupStart { base *= 1.08 }
-        let size = isActive ? base * 1.32 : base
-
         return VStack(spacing: 6) {
             ZStack {
-                if isActive {
+                if isFirst {
                     Circle()
-                        .stroke(Theme.accent.opacity(0.3), lineWidth: 1.5)
-                        .frame(width: size + 12, height: size + 12)
-                }
-                if isFirst && !isActive {
-                    Circle()
-                        .stroke(Theme.textTertiary, lineWidth: 1)
-                        .frame(width: size + 10, height: size + 10)
+                        .strokeBorder(isActive ? accent : Theme.textTertiary, lineWidth: 1.5)
+                        .frame(width: 34, height: 34)
                 }
                 Circle()
-                    .fill(isActive ? Theme.accent : Theme.dotIdle)
-                    .frame(width: size, height: size)
+                    .fill(isActive ? accent : Theme.dotIdle)
+                    .frame(width: 26, height: 26)
+                if isGroupStart {
+                    Circle()
+                        .strokeBorder(isActive ? Theme.background : Theme.textSecondary, lineWidth: 1)
+                        .frame(width: 20, height: 20)
+                }
             }
-            .frame(height: 42)
+            .frame(height: 34)
 
             HStack(spacing: 3) {
                 ForEach(1..<max(partsPerBeat, 2), id: \.self) { part in
                     Circle()
-                        .fill(isActive && part == activePart ? Theme.accent : Theme.dotIdle)
+                        .fill(isActive && part == activePart ? accent : Theme.dotIdle)
                         .frame(width: 4, height: 4)
                 }
             }
@@ -68,7 +83,6 @@ struct BeatTrackView: View {
                 .font(.system(size: 11, weight: isFirst ? .medium : .regular, design: .rounded).monospacedDigit())
                 .foregroundStyle(isActive ? Theme.textPrimary : Theme.textTertiary)
         }
-        .accessibilityHidden(true)
     }
 
     private var numberBlock: some View {
@@ -76,20 +90,20 @@ struct BeatTrackView: View {
             if let position, position.isCountIn {
                 Text("预备")
                     .font(.system(size: 20, weight: .medium, design: .rounded))
-                    .foregroundStyle(Theme.accent)
+                    .foregroundStyle(accent)
                 Text("\(position.beat + 1) / \(beatsPerBar)")
                     .font(.system(size: 12, design: .rounded).monospacedDigit())
                     .foregroundStyle(Theme.textTertiary)
             } else {
                 Text("\((position?.beat ?? 0) + 1)")
-                    .font(.system(size: 46, weight: .light, design: .rounded).monospacedDigit())
+                    .font(.system(size: compact ? 32 : 46, weight: .light, design: .rounded).monospacedDigit())
                     .foregroundStyle(position == nil ? Theme.textTertiary : Theme.textPrimary)
                 Text("第 \(position?.barNumber ?? 1) 小节")
                     .font(.system(size: 12, design: .rounded).monospacedDigit())
                     .foregroundStyle(Theme.textTertiary)
             }
         }
-        .frame(height: 84)
+        .frame(height: compact ? 58 : 84)
     }
 }
 
@@ -101,32 +115,43 @@ struct SegmentedRow<Item: Hashable>: View {
     let isSelected: (Item) -> Bool
     let onSelect: (Item) -> Void
 
+    var minimumItemWidth: CGFloat = 44
+
+    private let accent = Theme.accent
+
     var body: some View {
-        HStack(spacing: 6) {
-            ForEach(items, id: \.self) { item in
-                let selected = isSelected(item)
-                Button {
-                    onSelect(item)
-                } label: {
-                    Text(title(item))
-                        .font(.system(size: 14, weight: selected ? .medium : .regular, design: .rounded))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 38)
-                        .background(
-                            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                .fill(selected ? Theme.accent : Color.clear)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                .stroke(selected ? Color.clear : Theme.stroke, lineWidth: 0.5)
-                        )
-                        .foregroundStyle(selected ? Theme.background : Theme.textSecondary)
-                        // 未选中时背景是 Color.clear，不显式声明热区的话
-                        // 圆角边缘那一点会点不动。这里统一按整块矩形响应。
-                        .contentShape(Rectangle())
+        GeometryReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(items, id: \.self) { item in
+                        let selected = isSelected(item)
+                        Button {
+                            onSelect(item)
+                        } label: {
+                            Text(title(item))
+                                .font(.system(size: 14, weight: selected ? .medium : .regular, design: .rounded))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 44)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                        .fill(selected ? accent : Theme.surface)
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                        .stroke(selected ? Color.clear : Theme.stroke, lineWidth: 0.5)
+                                )
+                                .foregroundStyle(selected ? Theme.background : Theme.textSecondary)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(selected ? .isSelected : [])
+                    }
                 }
-                .buttonStyle(.plain)
+                .frame(width: max(proxy.size.width, CGFloat(items.count) * minimumItemWidth + CGFloat(max(items.count - 1, 0)) * 6))
             }
         }
+        .frame(height: 44)
     }
 }

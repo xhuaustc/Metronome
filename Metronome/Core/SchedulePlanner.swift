@@ -16,8 +16,17 @@ public final class SchedulePlanner {
     public private(set) var subdivision: Subdivision
     public private(set) var accentEnabled: Bool
 
+    private var practice: TempoPracticeConfiguration?
+    private var completedPracticeBars = 0
+    private var practiceHolding = false
+    private var pendingPracticeAction: (action: TempoPracticeAction, bpm: Int, revision: Int)?
+    private var requestedPracticeRevision = 0
+    private var appliedPracticeRevision = 0
+
     private var pendingBPM: Int?
-    private var pendingSignature: TimeSignature?
+    public private(set) var beatCounting: BeatCounting = .written
+    public private(set) var grouping = 0
+    private var pendingMeter: (signature: TimeSignature, counting: BeatCounting, grouping: Int, bpm: Int?)?
     private var pendingSubdivision: Subdivision?
     private var pendingAccent: Bool?
 
@@ -34,19 +43,34 @@ public final class SchedulePlanner {
     private var beatFrame: Double = 0
     private var startedFrame: Double = 0
 
-    private var history: [SoundPoint] = []
+    private struct VisualPoint {
+        let point: SoundPoint
+        let beatOrdinal: Int
+        let partsPerBeat: Int
+        let framesPerBeat: Double
+        let timeSignature: TimeSignature
+        let beatsPerBar: Int
+        let bpm: Int
+        let practice: TempoPracticeProgress?
+    }
+    private var beatOrdinal = 0
+    private var history: [VisualPoint] = []
 
     public init(sampleRate: Double,
                 bpm: Int,
                 timeSignature: TimeSignature,
                 subdivision: Subdivision = .none,
-                accentEnabled: Bool = true) {
+                accentEnabled: Bool = true,
+                beatCounting: BeatCounting = .written,
+                grouping: Int = 0) {
         self.sampleRate = sampleRate
-        self.bpm = bpm
+        self.bpm = BPMInput.clamp(bpm)
         self.timeSignature = timeSignature
+        self.beatCounting = timeSignature.isCompound ? beatCounting : .written
+        self.grouping = min(max(grouping, 0), timeSignature.groupingOptions.count - 1)
         self.subdivision = subdivision
         self.accentEnabled = accentEnabled
-        self.framesPerBeat = sampleRate * 60.0 / Double(bpm)
+        self.framesPerBeat = sampleRate * 60.0 / Double(self.bpm)
     }
 
     public var isRunning: Bool { running }
@@ -57,9 +81,16 @@ public final class SchedulePlanner {
 
     /// 从第一拍开始。frame 必须是音频引擎当前的渲染帧。
     public func start(atFrame frame: Double, countIn: Bool) {
+        if let practice { bpm = practice.startBPM }
+        completedPracticeBars = 0
+        practiceHolding = false
+        pendingPracticeAction = nil
+        requestedPracticeRevision = 0
+        appliedPracticeRevision = 0
         running = true
         countingIn = countIn
         beatIndex = 0
+        beatOrdinal = 0
         partIndex = 0
         barNumber = countIn ? 0 : 1
         startedFrame = frame
@@ -75,17 +106,75 @@ public final class SchedulePlanner {
         running = false
         countingIn = false
         beatIndex = 0
+        beatOrdinal = 0
         partIndex = 0
         barNumber = 1
         history.removeAll(keepingCapacity: true)
         commitPending()
+        pendingPracticeAction = nil
+        completedPracticeBars = 0
+        practiceHolding = false
+    }
+
+    public func configurePractice(_ configuration: TempoPracticeConfiguration?) {
+        guard !running else { return }
+        practice = configuration.flatMap { $0.enabled ? $0.sanitized() : nil }
+    }
+
+    @discardableResult
+    public func requestPracticeAction(_ action: TempoPracticeAction, atFrame frame: Double? = nil) -> Int? {
+        guard running, practice != nil else { return nil }
+        // 操作基于用户实际听到的档位，不能使用前瞻调度已推进到的未来档位。
+        let audibleBPM = frame.flatMap { position(at: $0)?.bpm } ?? bpm
+        requestedPracticeRevision += 1
+        pendingPracticeAction = (action, audibleBPM, requestedPracticeRevision)
+        return requestedPracticeRevision
+    }
+
+    private var practiceProgress: TempoPracticeProgress? {
+        guard let practice else { return nil }
+        return TempoPracticeProgress(bpm: bpm, targetBPM: practice.targetBPM,
+                                     stageBar: completedPracticeBars + 1, barsPerStep: practice.barsPerStep,
+                                     isHolding: practiceHolding, actionRevision: appliedPracticeRevision)
+    }
+
+    private func advancePractice(completedBar: Bool) {
+        guard let practice else { return }
+        if let request = pendingPracticeAction {
+            pendingPracticeAction = nil
+            appliedPracticeRevision = request.revision
+            switch request.action {
+            case .hold:
+                bpm = request.bpm
+                practiceHolding = true
+            case .resume:
+                bpm = request.bpm
+                practiceHolding = false
+                completedPracticeBars = 0
+            case .stepBack:
+                bpm = practice.startBPM + max(0, request.bpm - practice.startBPM - 1) / practice.increment * practice.increment
+                practiceHolding = true
+                completedPracticeBars = 0
+            }
+            return
+        }
+        guard completedBar, !practiceHolding, bpm < practice.targetBPM else { return }
+        completedPracticeBars += 1
+        if completedPracticeBars >= practice.barsPerStep {
+            bpm = min(bpm + practice.increment, practice.targetBPM)
+            completedPracticeBars = 0
+        }
     }
 
     // MARK: - 参数变更
 
     /// 下一拍生效。
     public func setBPM(_ value: Int) {
-        let clamped = min(max(value, 30), 240)
+        let clamped = BPMInput.clamp(value)
+        if pendingMeter?.bpm != nil {
+            pendingMeter?.bpm = clamped
+            return
+        }
         guard clamped != bpm else {
             pendingBPM = nil
             return
@@ -98,13 +187,25 @@ public final class SchedulePlanner {
         }
     }
 
-    /// 下一小节首拍生效。
-    public func setTimeSignature(_ value: TimeSignature) {
-        guard value != timeSignature else {
-            pendingSignature = nil
-            return
+    /// 拍号、计拍单位、分组和单位换算后的 BPM 在同一小节边界生效。
+    public func setMeter(_ signature: TimeSignature, counting: BeatCounting, grouping: Int, bpm targetBPM: Int? = nil) {
+        let counting: BeatCounting = signature.isCompound ? counting : .written
+        let grouping = min(max(grouping, 0), signature.groupingOptions.count - 1)
+        if running {
+            pendingMeter = (signature, counting, grouping, targetBPM.map(BPMInput.clamp))
+            if targetBPM != nil { pendingBPM = nil }
+        } else {
+            timeSignature = signature
+            beatCounting = counting
+            self.grouping = grouping
+            if let targetBPM { bpm = BPMInput.clamp(targetBPM) }
+            framesPerBeat = sampleRate * 60 / Double(bpm)
         }
-        if running { pendingSignature = value } else { timeSignature = value }
+    }
+
+    public func setTimeSignature(_ value: TimeSignature) {
+        guard value != timeSignature else { pendingMeter = nil; return }
+        setMeter(value, counting: beatCounting, grouping: grouping)
     }
 
     /// 下一小节首拍生效。
@@ -132,7 +233,7 @@ public final class SchedulePlanner {
             framesPerBeat = sampleRate * 60.0 / Double(bpm)
             pendingBPM = nil
         }
-        if let value = pendingSignature { timeSignature = value; pendingSignature = nil }
+        commitMeter()
         if let value = pendingSubdivision { subdivision = value; pendingSubdivision = nil }
         if let value = pendingAccent { accentEnabled = value; pendingAccent = nil }
     }
@@ -142,7 +243,7 @@ public final class SchedulePlanner {
 
     /// 是否存在被延后到下一小节的变更。
     public var hasPendingBarChange: Bool {
-        pendingSignature != nil || pendingSubdivision != nil || pendingAccent != nil
+        pendingMeter != nil || pendingSubdivision != nil || pendingAccent != nil
     }
 
     // MARK: - 生成
@@ -153,13 +254,22 @@ public final class SchedulePlanner {
         var output: [SoundPoint] = []
         output.reserveCapacity(16)
 
-        while output.count < maxPoints, beatFrame < limit {
+        while output.count < maxPoints {
             let parts = subdivision.partsPerBeat
             let offset = parts > 1 ? Double(partIndex) * framesPerBeat / Double(parts) : 0
-            let point = SoundPoint(frame: beatFrame + offset,
+            let pointFrame = beatFrame + offset
+            guard pointFrame < limit else { break }
+            if partIndex == 0, let value = pendingBPM {
+                pendingBPM = nil
+                bpm = value
+                framesPerBeat = sampleRate * 60.0 / Double(bpm)
+                anchorFrame = beatFrame
+                anchorBeat = beatIndex
+            }
+            let point = SoundPoint(frame: pointFrame,
                                    beat: beatIndex,
                                    part: partIndex,
-                                   accent: accentEnabled ? timeSignature.accent(atBeat: beatIndex) : .normal,
+                                   accent: accentEnabled ? timeSignature.accent(atBeat: beatIndex, counting: beatCounting, grouping: grouping) : .normal,
                                    isCountIn: countingIn,
                                    barNumber: barNumber)
             output.append(point)
@@ -175,25 +285,18 @@ public final class SchedulePlanner {
 
         partIndex = 0
 
-        // 此刻 beatFrame 仍是刚发出的那一拍。速度变更必须以「这一拍」为新段锚点，
-        // 而不是以按旧速度推算出的下一拍位置为锚点，否则新间隔会被吞掉。
-        if let value = pendingBPM {
-            pendingBPM = nil
-            bpm = value
-            framesPerBeat = sampleRate * 60.0 / Double(bpm)
-            anchorFrame = beatFrame
-            anchorBeat = beatIndex
-        }
-
+        // 当前拍按原速度完成，下一拍的位置由原速度确定。
         beatIndex += 1
+        beatOrdinal += 1
         beatFrame = anchorFrame + Double(beatIndex - anchorBeat) * framesPerBeat
 
-        if beatIndex >= timeSignature.beatsPerBar {
+        if beatIndex >= timeSignature.beatCount(beatCounting) {
             endOfBar()
         }
     }
 
     private func endOfBar() {
+        let completedPracticeBar = !countingIn
         if countingIn {
             countingIn = false
             barNumber = 1
@@ -201,9 +304,11 @@ public final class SchedulePlanner {
             barNumber += 1
         }
 
-        if let value = pendingSignature { timeSignature = value; pendingSignature = nil }
+        commitMeter()
         if let value = pendingSubdivision { subdivision = value; pendingSubdivision = nil }
         if let value = pendingAccent { accentEnabled = value; pendingAccent = nil }
+
+        advancePractice(completedBar: completedPracticeBar)
 
         beatIndex = 0
         partIndex = 0
@@ -212,10 +317,23 @@ public final class SchedulePlanner {
         framesPerBeat = sampleRate * 60.0 / Double(bpm)
     }
 
+    private func commitMeter() {
+        guard let meter = pendingMeter else { return }
+        timeSignature = meter.signature
+        beatCounting = meter.counting
+        grouping = meter.grouping
+        if let value = meter.bpm { bpm = value }
+        pendingMeter = nil
+        framesPerBeat = sampleRate * 60 / Double(bpm)
+    }
+
     // MARK: - 视觉查询
 
     private func record(_ point: SoundPoint) {
-        history.append(point)
+        history.append(VisualPoint(point: point, beatOrdinal: beatOrdinal,
+                                   partsPerBeat: subdivision.partsPerBeat, framesPerBeat: framesPerBeat,
+                                   timeSignature: timeSignature, beatsPerBar: timeSignature.beatCount(beatCounting),
+                                   bpm: bpm, practice: practiceProgress))
         if history.count > 256 {
             history.removeFirst(history.count - 128)
         }
@@ -226,19 +344,25 @@ public final class SchedulePlanner {
         guard running, !history.isEmpty, frame >= startedFrame else { return nil }
         guard let index = lastIndex(atOrBefore: frame) else { return nil }
 
-        let current = history[index]
-        let next: SoundPoint? = index + 1 < history.count ? history[index + 1] : nil
-        let nextFrame = next?.frame ?? (current.frame + framesPerBeat / Double(subdivision.partsPerBeat))
+        let visual = history[index]
+        let current = visual.point
+        let next: SoundPoint? = index + 1 < history.count ? history[index + 1].point : nil
+        let nextFrame = next?.frame ?? (current.frame + visual.framesPerBeat / Double(visual.partsPerBeat))
         let span = nextFrame - current.frame
         let progress = span > 0 ? min(max((frame - current.frame) / span, 0), 1) : 0
 
-        return PlaybackPosition(beat: current.beat,
+        return PlaybackPosition(bpm: visual.bpm, practice: visual.practice,
+                                timeSignature: visual.timeSignature,
+                                beatsPerBar: visual.beatsPerBar,
+                                partsPerBeat: visual.partsPerBeat,
+                                beat: current.beat,
                                 part: current.part,
                                 barNumber: current.barNumber,
                                 isCountIn: current.isCountIn,
                                 accent: current.accent,
                                 progress: progress,
-                                secondsToNext: next == nil ? nil : (nextFrame - frame) / sampleRate)
+                                secondsToNext: next == nil ? nil : (nextFrame - frame) / sampleRate,
+                                pendulumPhase: Double(visual.beatOrdinal % 2) + (Double(current.part) + progress) / Double(visual.partsPerBeat))
     }
 
     private func lastIndex(atOrBefore frame: Double) -> Int? {
@@ -247,7 +371,7 @@ public final class SchedulePlanner {
         var result: Int?
         while low <= high {
             let mid = (low + high) / 2
-            if history[mid].frame <= frame {
+            if history[mid].point.frame <= frame {
                 result = mid
                 low = mid + 1
             } else {

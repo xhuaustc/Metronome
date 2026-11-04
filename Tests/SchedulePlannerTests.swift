@@ -103,6 +103,46 @@ final class SchedulePlannerTests: XCTestCase {
         }
     }
 
+    func testSubdivisionPointsRespectExclusiveLimitAcrossCalls() {
+        for subdivision in [Subdivision.two, .three, .four] {
+            let planner = SchedulePlanner(sampleRate: 240, bpm: 60, timeSignature: .fourFour,
+                                          subdivision: subdivision)
+            planner.start(atFrame: 100, countIn: false)
+
+            XCTAssertTrue(planner.plan(upTo: 100).isEmpty)
+            XCTAssertEqual(planner.plan(upTo: 101).map(\.frame), [100])
+
+            let partFrames = 240.0 / Double(subdivision.partsPerBeat)
+            for part in 1..<subdivision.partsPerBeat {
+                let frame = 100 + Double(part) * partFrames
+                XCTAssertTrue(planner.plan(upTo: frame.nextDown).isEmpty)
+                XCTAssertTrue(planner.plan(upTo: frame).isEmpty)
+                XCTAssertEqual(planner.position(at: frame)?.part, part - 1)
+                let points = planner.plan(upTo: frame.nextUp)
+                XCTAssertEqual(points.map(\.frame), [frame])
+                XCTAssertEqual(points.map(\.part), [part])
+                XCTAssertTrue(planner.plan(upTo: frame.nextUp).isEmpty)
+            }
+
+            XCTAssertTrue(planner.plan(upTo: 340).isEmpty)
+            let nextBeat = planner.plan(upTo: 340.0.nextUp)
+            XCTAssertEqual(nextBeat.map(\.frame), [340])
+            XCTAssertEqual(nextBeat.map(\.beat), [1])
+            XCTAssertEqual(nextBeat.map(\.part), [0])
+        }
+    }
+
+    func testSubdivisionLimitAndMaxPointsPreserveCursor() {
+        let planner = SchedulePlanner(sampleRate: 240, bpm: 60, timeSignature: .fourFour, subdivision: .four)
+        planner.start(atFrame: 0, countIn: false)
+
+        XCTAssertTrue(planner.plan(upTo: 200, maxPoints: 0).isEmpty)
+        XCTAssertEqual(planner.plan(upTo: 120, maxPoints: 1).map(\.frame), [0])
+        XCTAssertEqual(planner.plan(upTo: 120, maxPoints: 1).map(\.frame), [60])
+        XCTAssertTrue(planner.plan(upTo: 120, maxPoints: 1).isEmpty)
+        XCTAssertEqual(planner.plan(upTo: 241).map(\.frame), [120, 180, 240])
+    }
+
     func testSubdivisionNeverDuplicatesBeat() {
         let planner = SchedulePlanner(sampleRate: sampleRate, bpm: 240, timeSignature: .fourFour, subdivision: .four)
         planner.start(atFrame: 0, countIn: false)
@@ -125,6 +165,112 @@ final class SchedulePlannerTests: XCTestCase {
         XCTAssertEqual(points[0].frame, 22050, accuracy: 1e-6, "第 1 拍仍按旧速度")
         XCTAssertEqual(points[1].frame, 66150, accuracy: 1e-6, "第 2 拍起按 60BPM，间隔 44100")
         XCTAssertEqual(points[2].frame, 110250, accuracy: 1e-6)
+    }
+
+    func testTempoChangeDuringSubdivisionRespectsWindows() {
+        for newBPM in [30, 80] {
+            let planner = SchedulePlanner(sampleRate: 240, bpm: 60, timeSignature: .fourFour,
+                                          subdivision: .three)
+            planner.start(atFrame: 0, countIn: false)
+            XCTAssertEqual(planner.plan(upTo: 1).map(\.frame), [0])
+            planner.setBPM(newBPM)
+
+            XCTAssertEqual(planner.plan(upTo: 160).map(\.frame), [80])
+            XCTAssertEqual(planner.bpm, 60)
+            XCTAssertTrue(planner.hasPendingTempoChange)
+            XCTAssertEqual(planner.plan(upTo: 160.0.nextUp).map(\.frame), [160])
+            XCTAssertEqual(planner.bpm, 60)
+            XCTAssertTrue(planner.hasPendingTempoChange)
+
+            let nextBeatFrame = 240.0
+            XCTAssertTrue(planner.plan(upTo: nextBeatFrame).isEmpty)
+            let next = planner.plan(upTo: nextBeatFrame.nextUp)
+            XCTAssertEqual(next.map(\.frame), [nextBeatFrame])
+            XCTAssertEqual(next.map(\.beat), [1])
+            XCTAssertEqual(next.map(\.part), [0])
+            XCTAssertEqual(planner.bpm, newBPM)
+            XCTAssertFalse(planner.hasPendingTempoChange)
+            let followingFrame = nextBeatFrame + 240.0 * 60.0 / Double(newBPM) / 3
+            XCTAssertTrue(planner.plan(upTo: followingFrame).isEmpty)
+            XCTAssertEqual(planner.plan(upTo: followingFrame.nextUp).map(\.frame), [followingFrame])
+        }
+    }
+
+    func testExtremeTempoChangesNeverMoveScheduledPointsBackwards() {
+        for (oldBPM, newBPM) in [(30, 240), (240, 30)] {
+            for targetBeat in [0, 3] {
+                for lastGeneratedPart in 0..<4 {
+                    let planner = SchedulePlanner(sampleRate: 240, bpm: oldBPM,
+                                                  timeSignature: .fourFour, subdivision: .four)
+                    let start = 1_000.0
+                    let oldBeatFrames = 240.0 * 60.0 / Double(oldBPM)
+                    let newBeatFrames = 240.0 * 60.0 / Double(newBPM)
+                    let beatFrame = start + Double(targetBeat) * oldBeatFrames
+                    let nextBeatFrame = beatFrame + oldBeatFrames
+                    planner.start(atFrame: start, countIn: targetBeat == 3)
+
+                    let changeFrame = beatFrame + Double(lastGeneratedPart) * oldBeatFrames / 4
+                    var points = planner.plan(upTo: changeFrame.nextUp)
+                    XCTAssertEqual(points.last?.frame, changeFrame)
+                    planner.setBPM(newBPM)
+                    XCTAssertTrue(planner.plan(upTo: changeFrame.nextUp).isEmpty)
+                    XCTAssertTrue(planner.hasPendingTempoChange)
+
+                    let remainder = planner.plan(upTo: nextBeatFrame)
+                    let expectedRemainder = ((lastGeneratedPart + 1)..<4).map {
+                        beatFrame + Double($0) * oldBeatFrames / 4
+                    }
+                    XCTAssertEqual(remainder.map(\.frame), expectedRemainder)
+                    points.append(contentsOf: remainder)
+                    XCTAssertEqual(planner.bpm, oldBPM)
+                    XCTAssertTrue(planner.hasPendingTempoChange)
+                    XCTAssertEqual(planner.position(at: nextBeatFrame.nextDown)?.part, 3)
+
+                    let next = planner.plan(upTo: nextBeatFrame.nextUp, maxPoints: 1)
+                    XCTAssertEqual(next.map(\.frame), [nextBeatFrame])
+                    XCTAssertEqual(next.map(\.part), [0])
+                    XCTAssertEqual(next.map(\.beat), [targetBeat == 3 ? 0 : 1])
+                    if targetBeat == 3 {
+                        XCTAssertEqual(next.first?.isCountIn, false)
+                        XCTAssertEqual(next.first?.barNumber, 1)
+                    }
+                    XCTAssertEqual(planner.bpm, newBPM)
+                    XCTAssertFalse(planner.hasPendingTempoChange)
+                    points.append(contentsOf: next)
+
+                    let following = planner.plan(upTo: (nextBeatFrame + 6 * newBeatFrames).nextUp)
+                    for (index, point) in following.enumerated() {
+                        XCTAssertEqual(point.frame, nextBeatFrame + Double(index + 1) * newBeatFrames / 4,
+                                       accuracy: 1e-9)
+                    }
+                    XCTAssertEqual(following.count, 24)
+                    points.append(contentsOf: following)
+                    for (previous, current) in zip(points, points.dropFirst()) {
+                        XCTAssertGreaterThan(current.frame, previous.frame,
+                                             "\(oldBPM)→\(newBPM)，拍 \(targetBeat)，细分 \(lastGeneratedPart)")
+                    }
+                }
+            }
+        }
+    }
+
+    func testPendingTempoCanBeReplacedOrCancelledBeforeNextBeat() {
+        let planner = SchedulePlanner(sampleRate: 240, bpm: 30, timeSignature: .fourFour,
+                                      subdivision: .four)
+        planner.start(atFrame: 0, countIn: false)
+        XCTAssertEqual(planner.plan(upTo: 361).map(\.frame), [0, 120, 240, 360])
+
+        planner.setBPM(240)
+        planner.setBPM(30)
+        XCTAssertFalse(planner.hasPendingTempoChange)
+        planner.setBPM(120)
+        planner.setBPM(240)
+        XCTAssertTrue(planner.plan(upTo: 480).isEmpty)
+        XCTAssertEqual(planner.bpm, 30)
+        XCTAssertEqual(planner.plan(upTo: 481).map(\.frame), [480])
+        XCTAssertEqual(planner.bpm, 240)
+        XCTAssertFalse(planner.hasPendingTempoChange)
+        XCTAssertEqual(planner.plan(upTo: 541).map(\.frame), [495, 510, 525, 540])
     }
 
     func testTimeSignatureChangeWaitsForNextBar() {

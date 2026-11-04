@@ -1,56 +1,37 @@
 #!/bin/bash
-#
-# 重新生成 App Store 截图（6.9 英寸，1320 × 2868）。
-#
-# 依赖 DEBUG 构建里的 -screenshotMode 启动参数，该代码在 Release 中不参与编译。
-# 换了界面就重跑一次，避免手搓截图。
-#
+# 从真实 Debug App 生成 7 张截图；使用专用模拟器避免改变日常测试数据。
 set -euo pipefail
-
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
-
-UDID="${SIM_UDID:-E7CA1814-2A2C-4EDB-84B2-C839FED16B81}"   # iPhone 17 Pro Max
+: "${SIM_UDID:?请指定截图专用模拟器 SIM_UDID}"
+OUT="${SCREENSHOT_OUTPUT:-build/store-2026-11-04/screenshots}"
+DD="${SCREENSHOT_DD:-build/review-dd}"
 BUNDLE_ID="com.mpan.pianometronome"
-DD="build/dd"
-OUT="store/screenshots"
-
 mkdir -p "$OUT"
-
-echo "==> 构建模拟器版本"
-xcodebuild -project PianoMetronome.xcodeproj \
-  -scheme PianoMetronome \
-  -destination "platform=iOS Simulator,id=$UDID" \
-  -configuration Debug \
-  -derivedDataPath "$DD" \
-  build CODE_SIGNING_ALLOWED=NO \
-  OTHER_SWIFT_FLAGS='$(inherited) -Xfrontend -disable-sandbox' \
-  >/dev/null
-
-echo "==> 启动模拟器"
-xcrun simctl boot "$UDID" 2>/dev/null || true
-xcrun simctl bootstatus "$UDID" -b >/dev/null
-
-# 状态栏统一成 9:41 + 满电满格，这是 App Store 截图的惯例。
-xcrun simctl status_bar "$UDID" override \
-  --time "9:41" --batteryState charged --batteryLevel 100 \
-  --cellularBars 4 --wifiBars 3
-
-xcrun simctl install "$UDID" "$DD/Build/Products/Debug-iphonesimulator/PianoMetronome.app"
-
-shoot() {          # shoot <文件名> <启动参数…>
+xcrun simctl boot "$SIM_UDID" 2>/dev/null || true
+xcrun simctl bootstatus "$SIM_UDID" -b >/dev/null
+if [ "${SCREENSHOT_SKIP_BUILD:-0}" != "1" ]; then
+  xcodebuild -project PianoMetronome.xcodeproj -scheme PianoMetronome \
+    -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+    -configuration Debug -derivedDataPath "$DD" build CODE_SIGNING_ALLOWED=NO > "$OUT/build.log" 2>&1
+fi
+xcrun simctl status_bar "$SIM_UDID" override --time "9:41" --batteryState charged --batteryLevel 100 --cellularBars 4 --wifiBars 3
+xcrun simctl install "$SIM_UDID" "$DD/Build/Products/Debug-iphonesimulator/PianoMetronome.app"
+shoot() {
   local name="$1"; shift
-  xcrun simctl terminate "$UDID" "$BUNDLE_ID" 2>/dev/null || true
-  xcrun simctl launch "$UDID" "$BUNDLE_ID" -screenshotMode "$@" >/dev/null
-  sleep 4
-  xcrun simctl io "$UDID" screenshot --type=png "$OUT/$name"
+  xcrun simctl terminate "$SIM_UDID" "$BUNDLE_ID" 2>/dev/null || true
+  xcrun simctl launch "$SIM_UDID" "$BUNDLE_ID" -screenshotMode "$@" >/dev/null
+  sleep "${SCREENSHOT_SETTLE_SECONDS:-10}"
+  xcrun simctl io "$SIM_UDID" screenshot --type=png "$OUT/$name"
 }
+shoot 01-home.png
+shoot 02-practice.png -screenshotPractice
+shoot 03-practice-settings.png -screenshotPracticeSettings
+shoot 04-meters.png -screenshotMeter
+shoot 05-appearance.png -screenshotSettings
+shoot 06-sounds.png -screenshotSettings -screenshotSounds
+shoot 07-favorites.png -screenshotFavorites
+xcrun simctl terminate "$SIM_UDID" "$BUNDLE_ID" >/dev/null
 
-echo "==> 截图"
-shoot 01-idle.png
-shoot 02-playing.png -screenshotPlaying
-shoot 03-settings.png -screenshotSettings
-
-for f in "$OUT"/*.png; do
-  printf '  %-22s %s\n' "$(basename "$f")" "$(sips -g pixelWidth -g pixelHeight "$f" | awk '/pixel/{printf "%s ", $2}')"
-done
+# App Store 不接受带 alpha 通道的截图。
+swift store/scripts/export-screenshots.swift "$OUT"
